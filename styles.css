@@ -950,11 +950,18 @@ button.mini.danger {
 
 .job-meta,
 .job-deps,
-.job-note {
+.job-note,
+.job-sched {
   margin: 4px 0 0;
   font-size: 12px;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.job-sched {
+  font-weight: 800;
+  color: var(--ink);
+  word-break: break-all;
 }
 
 .job-actions {

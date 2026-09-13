@@ -2,46 +2,49 @@ const { chromium } = require("@playwright/test");
 
 (async () => {
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1100 } });
   await page.goto("http://localhost:8717/index.html");
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await page.screenshot({ path: "/workspace/.e2e/shots/01-check-desk.png", fullPage: true });
   await page.click('[data-view-tab="repair"]');
   await page.waitForTimeout(300);
-  await page.screenshot({ path: "/workspace/.e2e/shots/02-repair-desk.png", fullPage: true });
-  // 制造人员+设备冲突
-  await page.evaluate(() => {
-    const add = (code, dmg) => {
-      document.querySelector("#fSegCode").value = code;
-      const cb = document.querySelector(`input[name=fdmg][value=${dmg}]`);
-      cb.checked = true;
-      document.querySelector("#fSubmit").click();
-      cb.checked = false;
-    };
-    add("XX-1", "scratch");
-    add("XX-2", "scratch");
-  });
-  await page.waitForTimeout(200);
-  await page.evaluate((personName) => {
-    const blocks = [...document.querySelectorAll(".gantt-block")];
-    const find = (code) => blocks.find((b) => b.querySelector("strong").textContent === code);
-    const laneName = [...document.querySelectorAll(".lane-name")].find((n) => n.textContent.includes(personName));
-    const lane = laneName.nextElementSibling;
-    const fire = (t, type, dt) => t.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
-    for (const code of ["XX-1", "XX-2"]) {
-      const b = [...document.querySelectorAll(".gantt-block")].find((x) => x.querySelector("strong").textContent === code);
-      const laneName = [...document.querySelectorAll(".lane-name")].find((n) => n.textContent.includes(personName));
-      const cell = laneName.nextElementSibling.querySelector('[data-cell-day="1"]');
-      const dt = new DataTransfer();
-      fire(b, "dragstart", dt);
-      fire(cell, "dragover", dt);
-      fire(cell, "drop", dt);
-      fire(b, "dragend", dt);
-    }
-  }, "林修复");
+  await page.screenshot({ path: "/workspace/.e2e/shots/04-step-gantt.png", fullPage: true });
+
+  // 把 A-030 的复检与 B卷复检 钉到同一放映员同一天 → 非主设备（放映机）冲突
+  const idOf = async (code) =>
+    page.evaluate(
+      (c) =>
+        [...document.querySelectorAll(".job-card")].find((x) =>
+          x.querySelector(".job-head strong").textContent === c
+        )?.querySelector("[data-pick]").dataset.pick,
+      code
+    );
+  const a030 = await idOf("A-030");
+  const place = await page.evaluate(
+    (job) => {
+      const b = document.querySelector(`.gantt-block[data-job="${job}"][data-step="screen"]`);
+      const laneIdx = [...document.querySelectorAll("[data-person-lane]")].indexOf(b.closest(".lane"));
+      return { person: [...document.querySelectorAll(".lane-name")][laneIdx].querySelector("strong").textContent, day: Number(b.style.gridColumnStart) - 2 };
+    },
+    a030
+  );
+  const drag = async (job, stepKey, person, day) =>
+    page.evaluate(
+      ({ job, stepKey, person, day }) => {
+        const block = document.querySelector(`.gantt-block[data-job="${job}"][data-step="${stepKey}"]`);
+        const laneName = [...document.querySelectorAll(".lane-name")].find((n) => n.textContent.includes(person));
+        const cell = laneName.nextElementSibling.querySelector(`[data-cell-day="${day}"]`);
+        const dt = new DataTransfer();
+        const fire = (t, ty) => t.dispatchEvent(new DragEvent(ty, { bubbles: true, cancelable: true, dataTransfer: dt }));
+        fire(block, "dragstart"); fire(cell, "dragover"); fire(cell, "drop"); fire(block, "dragend");
+      },
+      { job, stepKey, person: place.person, day: place.day }
+    );
+  const bJuan = await idOf("B卷");
+  await drag(a030, "screen", place.person, place.day); // 先钉住 A-030 复检
+  await drag(bJuan, "screen", place.person, place.day);
   await page.waitForTimeout(300);
-  await page.screenshot({ path: "/workspace/.e2e/shots/03-conflict.png", fullPage: true });
+  await page.screenshot({ path: "/workspace/.e2e/shots/05-step-conflict.png", fullPage: true });
+  console.log("SHOTS_DONE", JSON.stringify(place));
   await browser.close();
-  console.log("SHOTS_DONE");
 })();
