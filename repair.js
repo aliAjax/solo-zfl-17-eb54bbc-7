@@ -9,6 +9,7 @@
  */
 
 const REPAIR_STORAGE_KEY = "zfl17-film-repair-desk-v2";
+const LEGACY_STORAGE_KEYS = ["zfl17-film-repair-desk-v1", "zfl17-film-repair-desk-v0"];
 
 const SHIFTS = {
   早班: { label: "早班", hours: 8, window: "09:00–18:00" },
@@ -105,35 +106,241 @@ function buildDefaultState() {
   };
 }
 
-function migrateJobs(jobs) {
+/* ---------------- 启动加载：v2 → 旧版迁移 → 种子；任何损坏都不覆盖有效状态 ---------------- */
+
+function isObj(x) {
+  return x !== null && typeof x === "object" && !Array.isArray(x);
+}
+const isNonEmptyStr = (x) => typeof x === "string" && x.trim().length > 0;
+const safeParse = (raw) => {
+  if (raw == null) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+};
+function readStorage(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function dedupeById(list) {
+  const seen = new Set();
+  for (const item of list) {
+    if (seen.has(item.id)) item.id = uid();
+    seen.add(item.id);
+  }
+}
+function sanitizePeople(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  raw.forEach((p, i) => {
+    if (!isObj(p)) return;
+    out.push({
+      id: isNonEmptyStr(p.id) ? p.id : uid(),
+      name: isNonEmptyStr(p.name) ? p.name.trim() : `未命名人员${i + 1}`,
+      role: ROLES.includes(p.role) ? p.role : "修复师",
+      shift: SHIFTS[p.shift] ? p.shift : "早班"
+    });
+  });
+  dedupeById(out);
+  return out;
+}
+
+function sanitizeEquipment(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  raw.forEach((e, i) => {
+    if (!isObj(e)) return;
+    out.push({
+      id: isNonEmptyStr(e.id) ? e.id : uid(),
+      name: isNonEmptyStr(e.name) ? e.name.trim() : `未命名设备${i + 1}`
+    });
+  });
+  dedupeById(out);
+  return out;
+}
+
+function sanitizeReels(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  raw.forEach((r, i) => {
+    if (!isObj(r)) return;
+    out.push({
+      id: isNonEmptyStr(r.id) ? r.id : uid(),
+      name: isNonEmptyStr(r.name) ? r.name.trim() : `未命名胶片卷${i + 1}`
+    });
+  });
+  dedupeById(out);
+  return out;
+}
+
+function sanitizeSched(sched, damages, peopleIds) {
+  const out = {};
+  if (!isObj(sched)) return out;
+  for (const key of damages) {
+    const s = sched[key];
+    if (!isObj(s)) continue;
+    if (!peopleIds.has(s.assigneeId)) continue; // 指向已删除人员的步骤回到待排
+    const day = Number(s.startDay);
+    if (!Number.isInteger(day) || day < 0) continue;
+    out[key] = { assigneeId: s.assigneeId, startDay: day, pinned: !!s.pinned };
+  }
+  return out;
+}
+
+/* 识别任务上可能的损伤字段：v2 damages[]、v1 damage 字符串，未知值一律忽略 */
+function extractDamages(job) {
+  const keys = new Set();
+  if (Array.isArray(job.damages)) job.damages.forEach((k) => DAMAGE_MAP[k] && keys.add(k));
+  if (!keys.size && isNonEmptyStr(job.damage) && DAMAGE_MAP[job.damage.trim()]) keys.add(job.damage.trim());
+  return [...keys];
+}
+
+/* 返回 { jobs, orphanReelCreated }；幽灵依赖、自依赖、未知损伤在这一步清除；找不到卷的任务挂到 fallbackReelId */
+function sanitizeJobs(raw, peopleIds, reelIdMap, fallbackReelId) {
+  if (!Array.isArray(raw)) return { jobs: [], orphanReelCreated: false };
+  const jobs = [];
+  let orphanReelCreated = false;
+  raw.forEach((j) => {
+    if (!isObj(j)) return;
+    const damages = extractDamages(j);
+    if (!damages.length) return; // 无法识别损伤的条目跳过，不生成脏任务
+    const code = isNonEmptyStr(j.code) ? j.code.trim() : "未编号片段";
+    let reelId = reelIdMap.get(j.reelId);
+    if (!reelId) {
+      reelId = fallbackReelId || "__orphan__";
+      if (!fallbackReelId) orphanReelCreated = true;
+    }
+    jobs.push({
+      id: isNonEmptyStr(j.id) ? j.id : uid(),
+      reelId,
+      code,
+      damages,
+      priority: PRIORITY_RANK.hasOwnProperty(j.priority) ? j.priority : "中",
+      note: typeof j.note === "string" ? j.note : typeof j.note === "number" || typeof j.note === "boolean" ? String(j.note) : "",
+      rawDeps: Array.isArray(j.deps) ? [...new Set(j.deps)].filter(isNonEmptyStr) : [],
+      sched: sanitizeSched(j.sched, damages, peopleIds)
+    });
+  });
+  dedupeById(jobs);
+  const ids = new Set(jobs.map((j) => j.id));
   for (const j of jobs) {
-    if (!j.sched || typeof j.sched !== "object") j.sched = {};
-    // 丢弃步骤模型之前的任务级排程字段
-    delete j.assigneeId;
-    delete j.startDay;
-    delete j.pinned;
-    // 只保留已知工序的排程状态
-    for (const key of Object.keys(j.sched)) {
-      if (!DAMAGE_MAP[key]) delete j.sched[key];
+    j.deps = j.rawDeps.filter((d) => ids.has(d) && d !== j.id);
+    delete j.rawDeps;
+  }
+  return { jobs, orphanReelCreated };
+}
+
+function validDate(iso) {
+  return typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso) && !Number.isNaN(new Date(`${iso}T00:00:00`).getTime());
+}
+
+/* 消毒任意版本的解析结果；结构完全不可用时返回 null */
+function normalizeState(parsed) {
+  if (!isObj(parsed)) return null;
+  if (!Array.isArray(parsed.jobs) && !Array.isArray(parsed.people) && !Array.isArray(parsed.reels)) return null;
+
+  const people = sanitizePeople(parsed.people);
+  const equipment = sanitizeEquipment(parsed.equipment);
+  let reels = sanitizeReels(parsed.reels);
+  const peopleIds = new Set(people.map((p) => p.id));
+  const reelIdMap = new Map(reels.map((r) => [r.id, r.id]));
+
+  const { jobs, orphanReelCreated } = sanitizeJobs(parsed.jobs, peopleIds, reelIdMap);
+  let orphanReel = null;
+  if (orphanReelCreated) {
+    orphanReel = { id: uid(), name: "未命名胶片卷" };
+    reels.push(orphanReel);
+    jobs.forEach((j) => {
+      if (j.reelId === "__orphan__") j.reelId = orphanReel.id;
+    });
+  }
+  if (!reels.length) {
+    orphanReel = { id: uid(), name: "未命名胶片卷" };
+    reels.push(orphanReel);
+  }
+  const fallbackReelId = orphanReel ? orphanReel.id : reels[0].id;
+
+  // 撤销栈结构校验：只保留带合法 jobs 快照的条目（旧版/损坏条目丢弃，绝不回放脏数据）
+  let undo = [];
+  if (Array.isArray(parsed.undo)) {
+    undo = parsed.undo
+      .filter((u) => isObj(u) && Array.isArray(u.jobs))
+      .slice(-10)
+      .map((u) => ({
+        label: isNonEmptyStr(u.label) ? u.label : "批量调整",
+        jobs: sanitizeJobs(u.jobs, peopleIds, reelIdMap, fallbackReelId).jobs
+      }))
+      .filter((u) => u.jobs.length);
+  }
+
+  return {
+    startDate: validDate(parsed.startDate) ? parsed.startDate : isoDay(new Date()),
+    reels,
+    people,
+    equipment,
+    jobs,
+    undo
+  };
+}
+
+/* 返回 { state, notices }；优先级：有效 v2 > 可迁移旧版 > 种子 */
+function loadInitialState() {
+  const notices = [];
+
+  const v2parsed = safeParse(readStorage(REPAIR_STORAGE_KEY));
+  const v2Present = readStorage(REPAIR_STORAGE_KEY) !== null;
+  if (v2Present) {
+    const state = v2parsed === undefined ? null : normalizeState(v2parsed);
+    if (state) return { state, notices }; // 字段级损坏已在 normalize 内补默认/丢弃
+    notices.push("当前排程数据已损坏，已尝试从旧版本备份恢复。");
+  }
+
+  for (const legacyKey of LEGACY_STORAGE_KEYS) {
+    if (readStorage(legacyKey) === null) continue;
+    const legacy = safeParse(readStorage(legacyKey));
+    const state = legacy === undefined ? null : normalizeState(legacy);
+    if (!state) {
+      notices.push(`旧版本数据（${legacyKey}）已损坏且无法识别，已使用初始数据。`);
+      continue;
+    }
+    // v1 的任务级单一排程无法映射到多工序，统一清空由自动排程重算
+    for (const j of state.jobs) j.sched = {};
+    notices.push(`已从旧版本迁移 ${state.jobs.length} 项任务、${state.people.length} 名人员、${state.equipment.length} 台设备，工序排程已自动重算。`);
+    return { state, notices };
+  }
+
+  // 全新用户（空库）静默使用种子；有损坏/迁移才提示
+  return { state: buildDefaultState(), notices: v2Present || notices.length ? notices : [] };
+}
+
+let { state: initialState, notices: loadNotices } = loadInitialState();
+let rstate = initialState;
+
+/* 加载后校准：脏钉住互相冲突则放弃钉住重排；迁移/恢复的统一状态强制落 v2（数据有效即可，
+   结构型冲突如成环需要保留让用户看见，不走保存门禁） */
+function forcePersist() {
+  localStorage.setItem(REPAIR_STORAGE_KEY, JSON.stringify(rstate));
+}
+function normalizeLoadedSchedule() {
+  autoSchedule();
+  if (analyze().conflicts.length > 0) {
+    // 先尝试清掉所有手动钉住再排，消除可自动解决的占用冲突
+    for (const j of rstate.jobs) j.sched = {};
+    autoSchedule();
+    if (analyze().conflicts.length > 0) {
+      loadNotices.push("存档存在无法自动消解的排程冲突（如依赖成环），数据已完整保留，请在冲突面板处理后再保存。");
     }
   }
+  forcePersist(); // 统一状态立即落 v2，刷新不丢
 }
+normalizeLoadedSchedule();
 
-function loadRepairState() {
-  const saved = localStorage.getItem(REPAIR_STORAGE_KEY);
-  if (!saved) return buildDefaultState();
-  try {
-    const parsed = JSON.parse(saved);
-    if (!parsed || !Array.isArray(parsed.jobs) || !Array.isArray(parsed.people)) return buildDefaultState();
-    migrateJobs(parsed.jobs);
-    parsed.undo = Array.isArray(parsed.undo) ? parsed.undo : [];
-    return parsed;
-  } catch {
-    return buildDefaultState();
-  }
-}
-
-let rstate = loadRepairState();
 let editingId = null;
 const selected = new Set();
 
@@ -543,7 +750,8 @@ const rEls = {
   modalBody: $("#rModalBody"),
   modalCancel: $("#rModalCancel"),
   modalConfirm: $("#rModalConfirm"),
-  toast: $("#rToast")
+  toast: $("#rToast"),
+  loadNotices: $("#rLoadNotices")
 };
 
 let lastAnalysis = null;
@@ -1336,5 +1544,9 @@ document.querySelectorAll("[data-view-tab]").forEach((btn) => {
   renderDamageChecks();
   rEls.startDate.value = rstate.startDate;
   renderAll();
+  if (loadNotices.length) {
+    rEls.loadNotices.innerHTML = loadNotices.map((m) => `<span>${esc(m)}</span>`).join("");
+    rEls.loadNotices.hidden = false;
+  }
 })();
 })();
