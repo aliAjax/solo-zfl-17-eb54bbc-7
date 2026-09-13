@@ -3,11 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>胶片分镜条核对台</title>
+    <title>胶片核对台 · 分镜核对与离线修复调度</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="shell">
+    <nav class="desk-tabs" aria-label="工作台切换">
+      <button type="button" class="tab active" data-view-tab="check">胶片分镜条核对台</button>
+      <button type="button" class="tab" data-view-tab="repair">离线修复调度台</button>
+    </nav>
+
+    <main class="shell" id="viewCheck">
       <header class="hero">
         <div>
           <p class="eyebrow">纸质放映胶片整理</p>
@@ -111,6 +116,206 @@
       </section>
     </main>
 
+    <main class="shell repair-shell" id="viewRepair" hidden>
+      <header class="hero repair-hero">
+        <div>
+          <p class="eyebrow">放映员 · 修复师 · 资料管理员</p>
+          <h1>离线修复调度台</h1>
+          <p class="repair-sub">登记每卷片段的损伤与修复依赖，按班次、人员与设备自动排程；拖拽改派即时标冲突，冲突未解除不能保存。</p>
+        </div>
+        <div class="hero-stats">
+          <div>
+            <span>修复任务</span>
+            <strong id="rStatJobs">0</strong>
+          </div>
+          <div>
+            <span>预计完工</span>
+            <strong id="rStatMakespan">—</strong>
+          </div>
+          <div>
+            <span>风险指数</span>
+            <strong id="rStatRisk">—</strong>
+          </div>
+          <div class="stat-danger">
+            <span>待解冲突</span>
+            <strong id="rStatConflicts">0</strong>
+          </div>
+        </div>
+      </header>
+
+      <section class="toolbar r-toolbar">
+        <label>
+          当前岗位视角
+          <select id="rRoleView">
+            <option value="all">全部岗位</option>
+            <option value="放映员">放映员</option>
+            <option value="修复师">修复师</option>
+            <option value="资料管理员">资料管理员</option>
+          </select>
+        </label>
+        <label>
+          胶片卷
+          <select id="rReelFilter"></select>
+        </label>
+        <label>
+          开工日期
+          <input id="rStartDate" type="date" />
+        </label>
+        <label>
+          搜索任务
+          <input id="rSearch" type="search" placeholder="片段编号 / 备注" />
+        </label>
+        <button id="rUndoBtn" type="button" title="撤销上一次批量提交">↶ 撤销上次提交</button>
+        <button class="primary" id="rExportBtn" type="button">导出班表 CSV</button>
+      </section>
+
+      <section class="r-layout">
+        <aside class="panel r-left">
+          <h2 id="rFormTitle">登记损伤 / 修复任务</h2>
+          <form id="rJobForm" class="r-form">
+            <label>
+              胶片卷
+              <select id="fReel"></select>
+            </label>
+            <label id="fNewReelWrap" hidden>
+              新卷名称
+              <input id="fNewReel" type="text" placeholder="例：纪录片D卷" />
+            </label>
+            <label>
+              片段编号
+              <input id="fSegCode" required placeholder="A-014" />
+            </label>
+            <div class="field-block">
+              <span class="field-label">损伤类型（可多选）</span>
+              <div id="fDamages" class="check-grid"></div>
+            </div>
+            <label>
+              优先级
+              <select id="fPriority">
+                <option value="高">高</option>
+                <option value="中" selected>中</option>
+                <option value="低">低</option>
+              </select>
+            </label>
+            <div class="derive-row">
+              <label>
+                负责岗位
+                <input id="fRole" type="text" readonly />
+              </label>
+              <label>
+                所需设备
+                <input id="fEquip" type="text" readonly />
+              </label>
+            </div>
+            <label>
+              预估工时（小时，按损伤自动汇总）
+              <input id="fHours" type="number" min="1" step="1" value="1" readonly />
+            </label>
+            <div class="field-block">
+              <span class="field-label">前置依赖（该任务开始前必须完成）</span>
+              <div id="fDeps" class="dep-list"></div>
+            </div>
+            <label>
+              备注
+              <textarea id="fNote" rows="2" placeholder="损伤位置、修复手法或交接注意事项"></textarea>
+            </label>
+            <p class="form-error" id="fError" hidden></p>
+            <div class="form-actions">
+              <button class="primary" type="submit" id="fSubmit">登记任务</button>
+              <button type="button" id="fCancelEdit" hidden>取消编辑</button>
+            </div>
+          </form>
+
+          <div class="resource-box">
+            <h3>班次人员</h3>
+            <ul id="rPeopleList" class="resource-list"></ul>
+            <form id="rPersonForm" class="inline-form">
+              <input id="pName" type="text" required placeholder="姓名" />
+              <select id="pRole"></select>
+              <select id="pShift">
+                <option value="早班">早班 09–18</option>
+                <option value="晚班">晚班 18–24</option>
+              </select>
+              <button type="submit">＋</button>
+            </form>
+            <h3>修复设备</h3>
+            <ul id="rEquipList" class="resource-list"></ul>
+            <form id="rEquipForm" class="inline-form">
+              <input id="eName" type="text" required placeholder="设备名称，如：超声波清洁机" />
+              <button type="submit">＋</button>
+            </form>
+          </div>
+        </aside>
+
+        <section class="panel r-center">
+          <div class="panel-head gantt-head">
+            <h2>班次排程</h2>
+            <div class="gantt-actions">
+              <span class="hint">拖拽色块改派人员 / 日期，松手即检冲突</span>
+              <button type="button" id="rAutoBtn">全自动重排</button>
+              <button type="button" class="primary" id="rSaveBtn">保存排程</button>
+            </div>
+          </div>
+          <div id="rBlockBanner" class="block-banner" hidden></div>
+          <div class="gantt-scroll" id="rGanttScroll">
+            <div id="rGantt" class="gantt"></div>
+          </div>
+          <div class="tray-box">
+            <h3>未能排程 / 成环任务（拖入上方班次格可手动指派）</h3>
+            <div id="rTray" class="tray"></div>
+          </div>
+        </section>
+
+        <aside class="panel r-right">
+          <div class="batch-box">
+            <h2>批量调整</h2>
+            <p class="hint">勾选多个任务后，批量改损伤或优先级：先预览影响，确认后一次提交。</p>
+            <div id="rBatchControls" class="batch-controls">
+              <select id="bField">
+                <option value="priority">批量改优先级</option>
+                <option value="damages">批量改损伤</option>
+              </select>
+              <select id="bPriority" class="b-priority">
+                <option value="高">改为 高</option>
+                <option value="中">改为 中</option>
+                <option value="低">改为 低</option>
+              </select>
+              <div id="bDamages" class="check-grid b-damages" hidden></div>
+              <label class="b-mode" id="bModeWrap" hidden>
+                <input type="checkbox" id="bReplace" /> 替换原损伤（默认追加）
+              </label>
+              <button type="button" id="bPreviewBtn" class="primary">预览影响</button>
+            </div>
+            <div class="batch-actions-row">
+              <label class="select-all"><input type="checkbox" id="rSelectAll" /> 全选当前列表</label>
+              <button type="button" id="rClearSel" class="link-btn">清除选择</button>
+            </div>
+          </div>
+
+          <h2 class="job-list-title">任务清单 <span id="rSelCount"></span></h2>
+          <div id="rJobList" class="job-list"></div>
+
+          <h2>冲突与风险</h2>
+          <div id="rConflictList" class="conflict-list"></div>
+          <div id="rRiskBox" class="risk-box"></div>
+        </aside>
+      </section>
+    </main>
+
+    <div class="modal-backdrop" id="rModalBackdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rModalTitle">
+        <h2 id="rModalTitle">批量调整影响预览</h2>
+        <div id="rModalBody" class="modal-body"></div>
+        <div class="modal-actions">
+          <button type="button" id="rModalCancel">取消</button>
+          <button type="button" class="primary" id="rModalConfirm">确认一次提交</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="rToast" class="toast" hidden></div>
+
     <script src="app.js"></script>
+    <script src="repair.js"></script>
   </body>
 </html>
